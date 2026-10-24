@@ -14,7 +14,7 @@ import statistics
 import subprocess
 import sys
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 PTS = re.compile(r"Parsed_showinfo.*?\bpts_time:\s*([0-9.]+)")
 
 
@@ -112,6 +112,81 @@ def detect_cuts_adaptive(path, floor=0.1, hist_min=0.25, ratio_min=6.0, window=1
     return cuts
 
 
+def _gray_frames(path, w=64, h=36):
+    p = subprocess.Popen(["ffmpeg", "-v", "error", "-i", path, "-an", "-sn", "-vf", f"scale={w}:{h}",
+                          "-f", "rawvideo", "-pix_fmt", "gray", "-"], stdout=subprocess.PIPE)
+    size, out = w * h, []
+    try:
+        while True:
+            buf = p.stdout.read(size)
+            if len(buf) < size:
+                break
+            out.append(buf)
+    finally:
+        p.stdout.close()
+        p.wait()
+    return out
+
+
+def _blend(a, b, m):
+    """How far between a and b the frame m is (alpha, by projection), and what is left over (mean |residual|)."""
+    ab = [y - x for x, y in zip(a, b)]
+    den = sum(v * v for v in ab) or 1
+    alpha = sum((z - x) * v for x, z, v in zip(a, m, ab)) / den
+    res = sum(abs(z - x - alpha * v) for x, z, v in zip(a, m, ab)) / len(a)
+    return alpha, res
+
+
+def detect_transitions(path, fps, lag_s=0.4, min_change=12.0, linear_max=0.3, plateau=1.5):
+    """Dissolves and fades: the picture blends from one shot into another.
+    For a centre frame m with a = m-lag and b = m+lag:
+    - the change |a-b| is large;
+    - the window just before a or just after b changes much less (a steady shot on at least one side). A zoom, a pan
+      or a train going by changes all the time, so it has no such plateau;
+    - the frames around m sit on the straight path a -> b, partway along it (a blend, not a new picture);
+    - the picture before the span differs from the one after it (a glow that fades back is not a transition).
+    Returns [{start_s, end_s}] (the span is the centres widened by the lag). Checked by eye on 7 real clips: 8 of
+    9 found spans are real dissolves or fades, no visible one missed (see README)."""
+    f = _gray_frames(path)
+    n, lag = len(f), max(3, round(fps * lag_s))
+    if n < 6 * lag + 1:
+        return []
+    px = len(f[0])
+
+    def diff(p, q):
+        return sum(abs(x - y) for x, y in zip(p, q)) / px
+
+    centres = []
+    for i in range(3 * lag, n - 3 * lag):
+        a, b, m = f[i - lag], f[i + lag], f[i]
+        d = diff(a, b)
+        if d < min_change:
+            continue
+        # the windows before and after span the same 2*lag frames, so steady motion scores about 1, not 2.
+        # One steady side is enough: a fade often starts right after a cut.
+        if d < plateau * min(diff(f[i - 3 * lag], a), diff(b, f[i + 3 * lag])):
+            continue
+        # every pixel on one straight path a -> b, all at the same pace: a blend. A moving object changes different
+        # pixels at different times, so its frames do not sit on that path.
+        q = max(1, lag // 2)
+        fits = [_blend(a, b, f[k]) for k in (i - q, i, i + q)]
+        alphas = [al for al, _ in fits]
+        if all(r < linear_max * d for _, r in fits) and 0.2 <= alphas[1] <= 0.8:
+            centres.append(i)
+    runs, cur = [], []
+    for i in centres:
+        if cur and i - cur[-1] > 2:
+            runs.append(cur)
+            cur = []
+        cur.append(i)
+    if cur:
+        runs.append(cur)
+    spans = [(max(0, r[0] - lag), min(n - 1, r[-1] + lag)) for r in runs if len(r) >= 3]   # widened by the lag
+    # a transition leads to another picture; a glow or flash that fades back to the same shot does not
+    return [{"start_s": round(s / fps, 3), "end_s": round(e / fps, 3)} for s, e in spans
+            if diff(f[max(0, s - lag)], f[min(n - 1, e + lag)]) >= min_change]
+
+
 # ---------- timeline ----------
 
 def build_shots(cuts, duration, fps, min_shot=0.2):
@@ -158,10 +233,14 @@ def stats(shots, duration, window=10.0):
     }
 
 
-def analyse(path, fps=30, threshold=None, min_shot=0.2):
-    """threshold=None: the adaptive detector; a number: a plain ffmpeg scene threshold."""
+def analyse(path, fps=30, threshold=None, min_shot=0.2, gradual=False):
+    """threshold=None: the adaptive detector; a number: a plain ffmpeg scene threshold.
+    gradual=True: a dissolve or fade also ends a shot (at its middle); otherwise it is only listed."""
     info = probe(path)
     cuts = detect_cuts_adaptive(path) if threshold is None else detect_cuts(path, threshold)
+    transitions = detect_transitions(path, info["fps"] or fps)
+    if gradual:
+        cuts = list(cuts) + [round((t["start_s"] + t["end_s"]) / 2, 3) for t in transitions]
     shots = build_shots(cuts, info["duration"], fps, min_shot)
     return {
         "source": os.path.basename(path),
@@ -172,6 +251,8 @@ def analyse(path, fps=30, threshold=None, min_shot=0.2):
         "total_frames": round(info["duration"] * fps),
         "threshold": threshold,
         "shots": shots,
+        "transitions": transitions,
+        "gradual_as_cuts": gradual,
         "stats": stats(shots, info["duration"]),
     }
 
@@ -244,11 +325,12 @@ def main(argv=None):
                     help="use a plain scene threshold 0..1 instead of the adaptive detector (e.g. 0.3)")
     ap.add_argument("--min-shot", type=float, default=0.2, help="merge 'shots' shorter than this, in s (default 0.2)")
     ap.add_argument("--thumbs", action="store_true", help="save a thumbnail per shot")
+    ap.add_argument("--gradual", action="store_true", help="a dissolve or fade also ends a shot (at its middle)")
     ap.add_argument("--version", action="version", version=__version__)
     a = ap.parse_args(argv)
 
     try:
-        sheet = analyse(a.video, a.fps, a.threshold, a.min_shot)
+        sheet = analyse(a.video, a.fps, a.threshold, a.min_shot, a.gradual)
         os.makedirs(a.out, exist_ok=True)
         stem = os.path.splitext(os.path.basename(a.video))[0]
         with open(os.path.join(a.out, f"{stem}.cuts.json"), "w", encoding="utf-8") as f:
@@ -268,6 +350,11 @@ def main(argv=None):
               f"{s['duration_frames']:>5} f")
     if len(sheet["shots"]) > 40:
         print(f"  ... {len(sheet['shots']) - 40} more in the JSON")
+    tr = sheet["transitions"]
+    if tr and not a.gradual:      # said loudly: "1 shot" from a cut built on dissolves would look like success
+        spans = ", ".join(f"{t['start_s']:.2f}-{t['end_s']:.2f}" for t in tr[:10])
+        print(f"cut-sheet: {len(tr)} gradual transition(s) (dissolve or fade) at {spans} s are listed in the JSON, "
+              f"not counted as cuts; --gradual counts them", file=sys.stderr)
     print(f"wrote {stem}.cuts.json, {stem}.cuts.tsx" + (f", {stem}.thumbs/" if a.thumbs else "") + f" in {a.out}")
     return 0
 

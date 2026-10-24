@@ -133,5 +133,79 @@ class OnVideo(unittest.TestCase):
         self.assertEqual(len(sheet["shots"]), 1)
 
 
+FIX = os.path.join(os.path.dirname(__file__), "fixtures")
+
+
+def ff(*args):
+    subprocess.run(["ffmpeg", "-v", "error", "-y", *args], check=True)
+
+
+class Gradual(unittest.TestCase):
+    """Found by an independent tester, 24.10: a reference cut with dissolves came back as '1 shot' with no warning."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        d = cls.tmp.name
+        a, b = os.path.join(FIX, "ThirdAve1950_excerpt1.mp4"), os.path.join(FIX, "ThirdAve1950_excerpt2.mp4")
+        # real dissolves: two excerpts of NASA's "Orion EFT1 Animation No Narration" (archive.org, CC0), 60 fps.
+        # Labelled by eye on frames every 0.1 s: the launch pad dissolves into the rocket in the sky over ~1.0-1.6 s,
+        # and space into the capsule over the Earth over ~1.65-2.3 s.
+        cls.dissolve = os.path.join(FIX, "OrionEft1_dissolve2.mp4")
+        cls.dissolve1 = os.path.join(FIX, "OrionEft1_dissolve1.mp4")
+        # a fade to black over 4.0-5.0 s, black, and a fade back in over 5.5-6.5 s, on real footage
+        cls.fade = os.path.join(d, "fade.mp4")
+        ff("-i", a, "-filter_complex",
+           "[0:v]split[p][q];"
+           "[p]trim=0:5.5,setpts=PTS-STARTPTS,fps=30,fade=t=out:st=4:d=1[x];"
+           "[q]trim=3.5:8.5,setpts=PTS-STARTPTS,fps=30,fade=t=in:st=0:d=1[y];[x][y]concat=n=2:v=1[out]",
+           "-map", "[out]", "-c:v", "libx264", "-pix_fmt", "yuv420p", cls.fade)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_real_dissolves_are_listed_with_their_span(self):
+        for path, (lo, hi) in ((self.dissolve1, (1.0, 1.6)), (self.dissolve, (1.65, 2.3))):
+            tr = cut_sheet.analyse(path, fps=30)["transitions"]
+            self.assertEqual(len(tr), 1, (path, tr))
+            self.assertTrue(lo - 0.4 <= tr[0]["start_s"] <= lo and hi <= tr[0]["end_s"] <= hi + 0.8, (path, tr))
+
+    def test_one_dissolve_is_reported_once(self):
+        # OrionEft1_dissolve3 (41.5-48 s of the same film): the globe dissolves into the capsule over ~2.0-3.6 s;
+        # a stray run of 2 frames near its end must not become a second, overlapping transition
+        tr = cut_sheet.analyse(os.path.join(FIX, "OrionEft1_dissolve3.mp4"), fps=30)["transitions"]
+        self.assertEqual(len(tr), 1, tr)
+
+    def test_a_glow_that_fades_back_is_not_a_transition(self):
+        # OrionEft1_dissolve1 2.5-3.4 s: a haze brightens around the rocket and fades back to the same shot
+        tr = cut_sheet.analyse(self.dissolve1, fps=30)["transitions"]
+        self.assertFalse(any(t["start_s"] > 2.2 for t in tr), tr)
+
+    def test_a_fade_through_black_is_listed(self):
+        tr = cut_sheet.analyse(self.fade, fps=30)["transitions"]
+        self.assertTrue(any(3.8 <= t["start_s"] <= 4.4 for t in tr), tr)
+
+    def test_hard_cut_film_has_no_transitions(self):
+        for name in ("ThirdAve1950_excerpt1.mp4", "ThirdAve1950_excerpt2.mp4"):
+            self.assertEqual(cut_sheet.analyse(os.path.join(FIX, name), fps=30)["transitions"], [], name)
+
+    def test_a_zoom_is_not_a_transition(self):
+        v = os.path.join(self.tmp.name, "zoom.mp4")
+        ff("-f", "lavfi", "-i", "mandelbrot=s=320x180:r=25", "-t", "4", "-c:v", "libx264", "-pix_fmt", "yuv420p", v)
+        self.assertEqual(cut_sheet.analyse(v, fps=25)["transitions"], [])
+
+    def test_gradual_turns_transitions_into_cuts(self):
+        sheet = cut_sheet.analyse(self.dissolve, fps=30, gradual=True)
+        self.assertTrue(any(1.6 <= s["start_s"] <= 2.4 for s in sheet["shots"]), sheet["shots"])
+
+    def test_the_cli_warns_when_only_transitions_were_found(self):
+        out = os.path.join(self.tmp.name, "o")
+        r = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "..", "cut_sheet.py"), self.fade,
+                            "-o", out], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("gradual", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

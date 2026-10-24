@@ -57,9 +57,18 @@ Measured by looking at the frames on both sides of every candidate (not by trust
 
 Two clips, 27 cuts, both Prelinger Archives films from archive.org. That is a small test, said plainly; if it gets your footage wrong, `--threshold 0.3` gives you ffmpeg's plain behaviour, and an issue with a timestamp helps.
 
+## Dissolves and fades
+
+Gradual transitions are not cuts, so they are listed apart: `transitions` in the JSON, and a line on stderr ("2 gradual transition(s) at 3.67-5.27, ... s ... --gradual counts them"). A reference built on dissolves no longer comes back as a silent "1 shot". `--gradual` ends a shot at the middle of each one.
+
+How: around each frame, the picture must change a lot, sit on a straight blend between the frames before and after (every pixel at the same pace), have a calmer stretch on at least one side, and end on a different picture than it started. A zoom, a pan or a crowd moving changes the picture without blending it; a glow that fades back returns to the same picture.
+
+How well, checked by eye on frames every 0.1 s (not by the tool's own numbers): two NASA animations of 50 s each (8 dissolves and fades) and three films with only hard cuts (a 1953 newsreel with a handheld camera, two *Third Avenue El* excerpts). **9 found, 8 real, none visible missed;** the one false span is a slow lighting change on a capsule. Span edges are good to about 0.3 s.
+
 ## Limits
 
-- **Hard cuts only.** Dissolves, fades to black and wipes are gradual; *Despotism* has four, and none is reported. They end up inside a shot.
+- **A dissolve between two shots full of motion can be missed.** Such a blend looks like the motion itself; one planted on *Third Avenue El* (a train passing in both shots) was not found. Dissolves with a calm side, and every fade through black, are.
+- Wipes and other shaped transitions are not detected.
 - A cut between two very similar dark shots can slip by (the one miss above: a dark sign to a dark street).
 - `--min-shot` (default 0.2 s) merges flashes shorter than that into the previous shot.
 - The pace is cuts per minute, not audio tempo.
@@ -72,7 +81,9 @@ python -m unittest discover -s tests
 
 Synthetic videos with known cuts (found within a frame; low-contrast cuts a fixed threshold misses; a zoom that is not a cut; frames adding up exactly at another fps), and two excerpts of real film (22 s in total) with every cut and every non-cut peak labelled by eye. Each detection rule was removed on purpose to make sure a test goes red without it; a rule that no test needed ("score ≥ 0.4 is always a cut") was dropped.
 
-Test footage: excerpts of *Third Avenue El* by Carson Davidson, Prelinger Archives, [archive.org/details/ThirdAve1950](https://archive.org/details/ThirdAve1950), stated Public Domain on the item page.
+Dissolves: three excerpts of NASA's *Orion EFT1 Animation No Narration* (60 fps) with each dissolve's span labelled by eye; a fade to black and back on *Third Avenue El*; the glow that is not a transition; the hard-cut films with no transitions; a zoom. Every rule of the dissolve finder was removed on purpose: three that no test and no real clip needed were dropped.
+
+Test footage: excerpts of *Orion EFT1 Animation No Narration*, NASA, [archive.org/details/OrionEft1AnimationNoNarration](https://archive.org/details/OrionEft1AnimationNoNarration), CC0. Excerpts of *Third Avenue El* by Carson Davidson, Prelinger Archives, [archive.org/details/ThirdAve1950](https://archive.org/details/ThirdAve1950), stated Public Domain on the item page.
 
 ## License
 
