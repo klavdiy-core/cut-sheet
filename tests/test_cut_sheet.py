@@ -53,6 +53,11 @@ class Pure(unittest.TestCase):
         near = [bytes([40 + i // 8] * 100) for i in range(40)]           # a slow drift: about 1 grey level apart
         self.assertEqual(cut_sheet.confirm_cuts([20 / 25], near, 25), [])
 
+    def test_cut_strength_measures_the_picture_change_across_a_cut(self):
+        a, b = bytes([40] * 100), bytes([200] * 100)
+        self.assertEqual(cut_sheet.cut_strength(0.8, [a] * 20 + [b] * 20, 25), 160.0)
+        self.assertEqual(cut_sheet.cut_strength(0.8, [a] * 40, 25), 0.0)
+
     def test_overlapping_transitions_are_merged(self):
         self.assertEqual(cut_sheet.merge_spans([(10, 20), (18, 30), (40, 50)]), [(10, 30), (40, 50)])
         self.assertEqual(cut_sheet.merge_spans([(40, 50), (10, 20)]), [(10, 20), (40, 50)])
@@ -78,6 +83,23 @@ class OnVideo(unittest.TestCase):
         for got, want in zip(cuts, [1.5, 2.3, 4.5]):
             self.assertLessEqual(abs(got - want), 1 / 25 + 1e-6, cuts)
         self.assertAlmostEqual(sheet["duration_s"], 5.5, delta=0.05)
+        # every cut says how sure it is (an outside re-grade, 25.10: "which of 31 cuts do I trust?")
+        for s in sheet["shots"][1:]:
+            self.assertEqual(s["cut"], "hard")
+            self.assertGreater(s["cut_strength"], 0)
+            self.assertIn(s["confidence"], ("high", "low"))
+        self.assertNotIn("cut", sheet["shots"][0])                  # the first shot starts at 0, not at a cut
+
+    def test_low_confidence_cuts_are_listed_in_the_summary(self):
+        sheet = {"source": "x.mp4", "duration_s": 10.0, "transitions": [],
+                 "shots": [{"index": 1, "start_s": 0.0, "end_s": 4.0, "duration_s": 4.0, "duration_frames": 120},
+                           {"index": 2, "start_s": 4.0, "end_s": 6.07, "duration_s": 2.07, "duration_frames": 62,
+                            "cut": "hard", "cut_strength": 24.1, "confidence": "low"},
+                           {"index": 3, "start_s": 6.07, "end_s": 10.0, "duration_s": 3.93, "duration_frames": 118,
+                            "cut": "hard", "cut_strength": 88.0, "confidence": "high"}]}
+        line = cut_sheet.summary(sheet, gradual=False)
+        self.assertIn("3 shots", line)
+        self.assertIn("1 cut to check by eye: 4.00 s", line)
 
     def test_target_fps_changes_frames_not_seconds(self):
         sheet = cut_sheet.analyse(self.video, fps=60)
@@ -220,8 +242,17 @@ class Gradual(unittest.TestCase):
                             "-o", out], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("gradual", r.stderr)
-        # and in the summary line on stdout, for whoever pipes stdout or ignores stderr (an outside re-grade, 25.10)
-        self.assertIn("gradual transition(s) not counted", r.stdout.splitlines()[0])
+        # and in the summary line on stdout, for whoever pipes stdout or ignores stderr (an outside re-grade, 25.10),
+        # in words a reader gets at once: "1 shot", not "1 shots", and what the transitions are
+        first = r.stdout.splitlines()[0]
+        self.assertRegex(first, r"\d+ shots? \+ ")
+        self.assertNotRegex(first, r"\b1 shots\b")
+        self.assertEqual(cut_sheet._n(1, "shot", "shots"), "1 shot")
+        self.assertRegex(first, r"\d+ dissolves?/fades? not counted as cuts \(--gradual counts them\)")
+
+    def test_gradual_cuts_are_marked_as_such(self):
+        sheet = cut_sheet.analyse(self.dissolve, fps=30, gradual=True)
+        self.assertTrue(any(s.get("cut") == "gradual" for s in sheet["shots"][1:]), sheet["shots"])
 
 
 if __name__ == "__main__":

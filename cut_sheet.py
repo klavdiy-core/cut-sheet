@@ -14,7 +14,7 @@ import statistics
 import subprocess
 import sys
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 PTS = re.compile(r"Parsed_showinfo.*?\bpts_time:\s*([0-9.]+)")
 
 
@@ -137,6 +137,17 @@ def _blend(a, b, m):
     return alpha, res
 
 
+LOW_CONFIDENCE = 35.0     # a kept cut below this picture change is worth a look (false cuts measured 5-22, real 29+)
+
+
+def cut_strength(c, frames, fps, gap=4):
+    """How much the picture changes across a cut: mean grey-level difference of the frames `gap` before and after."""
+    n, px = len(frames), len(frames[0])
+    i = round(c * fps)
+    a, b = frames[max(0, i - gap)], frames[min(n - 1, i + gap - 1)]
+    return round(sum(abs(x - y) for x, y in zip(a, b)) / px, 1)
+
+
 def confirm_cuts(cuts, frames, fps, gap=4, min_across=20.0):
     """Keep a cut only if the picture really differs across it: the frames `gap` before and after it (64x36 grey)
     differ by at least min_across grey levels on average. Haze clearing or a plane turning inside one shot can trip the
@@ -144,14 +155,7 @@ def confirm_cuts(cuts, frames, fps, gap=4, min_across=20.0):
     such false cuts measured 5-14, real cuts 29 and more, including two cuts between shots of the same grey street."""
     if not frames:
         return list(cuts)
-    n, px = len(frames), len(frames[0])
-    kept = []
-    for c in cuts:
-        i = round(c * fps)
-        a, b = frames[max(0, i - gap)], frames[min(n - 1, i + gap - 1)]
-        if sum(abs(x - y) for x, y in zip(a, b)) / px >= min_across:
-            kept.append(c)
-    return kept
+    return [c for c in cuts if cut_strength(c, frames, fps, gap) >= min_across]
 
 
 def merge_spans(spans):
@@ -270,9 +274,16 @@ def analyse(path, fps=30, threshold=None, min_shot=0.2, gradual=False):
     cuts = detect_cuts_adaptive(path) if threshold is None else detect_cuts(path, threshold)
     cuts = confirm_cuts(cuts, frames, src_fps)
     transitions = detect_transitions(path, src_fps, frames=frames)
-    if gradual:
-        cuts = list(cuts) + [round((t["start_s"] + t["end_s"]) / 2, 3) for t in transitions]
-    shots = build_shots(cuts, info["duration"], fps, min_shot)
+    hard = {c: cut_strength(c, frames, src_fps) for c in cuts} if frames else {c: None for c in cuts}
+    mids = [round((t["start_s"] + t["end_s"]) / 2, 3) for t in transitions] if gradual else []
+    shots = build_shots(list(cuts) + mids, info["duration"], fps, min_shot)
+    for s in shots[1:]:                        # what each cut is, and how sure: which cuts to check by eye
+        if s["start_s"] in hard:
+            v = hard[s["start_s"]]
+            s["cut"], s["cut_strength"] = "hard", v
+            s["confidence"] = "high" if v is None or v >= LOW_CONFIDENCE else "low"
+        else:
+            s["cut"], s["confidence"] = "gradual", "high"
     return {
         "source": os.path.basename(path),
         "source_fps": info["fps"],
@@ -289,6 +300,25 @@ def analyse(path, fps=30, threshold=None, min_shot=0.2, gradual=False):
 
 
 # ---------- outputs ----------
+
+def _n(k, one, many):
+    return f"{k} {one if k == 1 else many}"
+
+
+def summary(sheet, gradual):
+    """The first line a person reads: shots, what was not counted and why, and which cuts to check by eye."""
+    st = sheet.get("stats") or stats(sheet["shots"], sheet["duration_s"])
+    tr = sheet["transitions"]
+    line = f"{sheet['source']}: {sheet['duration_s']} s, {_n(st['shots'], 'shot', 'shots')}"
+    if tr and not gradual:      # in the line itself: "1 shot" for a film edited with dissolves read as the whole answer
+        line += f" + {_n(len(tr), 'dissolve/fade', 'dissolves/fades')} not counted as cuts (--gradual counts them)"
+    line += (f", mean {st['mean_shot_s']} s (median {st['median_shot_s']}, {st['shortest_s']}..{st['longest_s']}), "
+             f"{st['cuts_per_min']} cuts/min")
+    low = [s["start_s"] for s in sheet["shots"][1:] if s.get("confidence") == "low"]
+    if low:
+        line += (f"; {_n(len(low), 'cut', 'cuts')} to check by eye: "
+                 + ", ".join(f"{t:.2f}" for t in low[:10]) + " s")
+    return line
 
 def thumbs(path, sheet, out_dir):
     os.makedirs(out_dir, exist_ok=True)
@@ -373,12 +403,7 @@ def main(argv=None):
     except (RuntimeError, OSError, ValueError) as e:
         print(f"cut-sheet: {e}", file=sys.stderr)
         return 2
-    st = sheet["stats"]
-    tr = sheet["transitions"]
-    # in the summary itself, not only on stderr: "1 shots" for a film edited with dissolves read as the whole answer
-    gradual_note = f" + {len(tr)} gradual transition(s) not counted (--gradual)" if tr and not a.gradual else ""
-    print(f"{sheet['source']}: {sheet['duration_s']} s, {st['shots']} shots{gradual_note}, mean {st['mean_shot_s']} s "
-          f"(median {st['median_shot_s']}, {st['shortest_s']}..{st['longest_s']}), {st['cuts_per_min']} cuts/min")
+    print(summary(sheet, a.gradual))
     for s in sheet["shots"][:40]:
         print(f"  {s['index']:>3}  {s['start_s']:8.3f} -> {s['end_s']:8.3f}  {s['duration_s']:6.3f} s  "
               f"{s['duration_frames']:>5} f")
