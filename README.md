@@ -11,7 +11,9 @@ A five-stage video workflow (reference → data → structure → Remotion → e
 ## What it does
 
 ```sh
-python cut_sheet.py reference.mp4 -o cuts --fps 30 --thumbs
+git clone https://github.com/klavdiy-core/cut-sheet && cd cut-sheet
+python cut_sheet.py tests/fixtures/ThirdAve1950_excerpt1.mp4 -o cuts --fps 30 --thumbs   # a real 10 s film clip ships with it
+python cut_sheet.py reference.mp4 -o cuts --fps 30 --thumbs                               # then your own
 ```
 
 ```
@@ -48,6 +50,10 @@ ffmpeg gives a scene-change score for every frame. A fixed threshold (the usual 
 
 Motion inside a shot keeps the colours and keeps the neighbourhood busy; a cut does neither.
 
+Then each cut is **checked on the picture itself**: the frames four apart on its two sides must really differ. Haze
+clearing, or a plane turning inside one shot, can trip the score while the same picture sits on both sides; those
+measured 5–14 grey levels apart, real cuts 29 and more (two of them between shots of the same grey street).
+
 Measured by looking at the frames on both sides of every candidate (not by trusting the tool):
 
 | clip | role | fixed threshold 0.3 | cut-sheet |
@@ -55,13 +61,18 @@ Measured by looking at the frames on both sides of every candidate (not by trust
 | *Third Avenue El* (1950s), 60 s, 22 cuts | rules tuned here | 11 / 22 found, 0 false | **21 / 22 found, 1 false** |
 | *Despotism* (1946), 60 s, 5 hard cuts | checked blind afterwards | 4 / 5 found, 0 false | **5 / 5 found, 1 false** |
 
-Two clips, 27 cuts, both Prelinger Archives films from archive.org. That is a small test, said plainly; if it gets your footage wrong, `--threshold 0.3` gives you ffmpeg's plain behaviour, and an issue with a timestamp helps.
+A third clip came from an outside tester (*San Francisco Scenes*, Prelinger, 74 s, hazy aerial footage): 22 cuts
+were reported, and by eye most of the doubtful ones were the same shot on both sides. With the picture check, 14 are
+reported; one false cut there (a flying boat in haze, 44.5 s) is still reported.
+
+Three clips, all black-and-white Prelinger Archives films from archive.org. That is a small test, said plainly;
+colour footage and fast modern editing are untested; if it gets your footage wrong, `--threshold 0.3` gives you ffmpeg's plain behaviour, and an issue with a timestamp helps.
 
 ## Dissolves and fades
 
-Gradual transitions are not cuts, so they are listed apart: `transitions` in the JSON, and a line on stderr ("2 gradual transition(s) at 3.67-5.27, ... s ... --gradual counts them"). A reference built on dissolves no longer comes back as a silent "1 shot". `--gradual` ends a shot at the middle of each one.
+Gradual transitions are not cuts, so they are listed apart: `transitions` in the JSON, in the summary line ("1 shots + 3 gradual transition(s) not counted (--gradual)") and with their times on stderr. A reference built on dissolves no longer comes back as a bare "1 shot". `--gradual` ends a shot at the middle of each one. Two detections of the same transition are merged into one span.
 
-How: around each frame, the picture must change a lot, sit on a straight blend between the frames before and after (every pixel at the same pace), have a calmer stretch on at least one side, and end on a different picture than it started. A zoom, a pan or a crowd moving changes the picture without blending it; a glow that fades back returns to the same picture.
+How: around each frame, the picture must change a lot, sit on a straight blend between the frames before and after (every pixel at the same pace), have a calmer stretch on at least one side, and end on a different picture than it started. A zoom or a crowd moving changes the picture without blending it; a glow that fades back returns to the same picture. **A slow pan over a hazy, low-contrast scene can still look like a blend:** on the outside tester's film, 2 of 10 spans were a pan across the Golden Gate Bridge, and one of them is still listed.
 
 How well, checked by eye on frames every 0.1 s (not by the tool's own numbers): two NASA animations of 50 s each (8 dissolves and fades) and three films with only hard cuts (a 1953 newsreel with a handheld camera, two *Third Avenue El* excerpts). **9 found, 8 real, none visible missed;** the one false span is a slow lighting change on a capsule. Span edges are good to about 0.3 s.
 
@@ -70,7 +81,8 @@ How well, checked by eye on frames every 0.1 s (not by the tool's own numbers): 
 - **A dissolve between two shots full of motion can be missed.** Such a blend looks like the motion itself; one planted on *Third Avenue El* (a train passing in both shots) was not found. Dissolves with a calm side, and every fade through black, are.
 - Wipes and other shaped transitions are not detected.
 - A cut between two very similar dark shots can slip by (the one miss above: a dark sign to a dark street).
-- `--min-shot` (default 0.2 s) merges flashes shorter than that into the previous shot.
+- `--min-shot` (default 0.2 s) merges flashes shorter than that into the previous shot. Damaged film with white or black flash frames can still leave a few "shots" of 0.2–0.3 s; raise `--min-shot` for such material.
+- A slow pan in haze can be listed as a transition (above). Each one is in the JSON with its times, so check them by eye before you trust them.
 - The pace is cuts per minute, not audio tempo.
 
 ## Test

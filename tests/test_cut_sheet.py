@@ -42,6 +42,21 @@ class Pure(unittest.TestCase):
         shots = cut_sheet.build_shots([1.0, 1.05, 3.0], duration=4.0, fps=30, min_shot=0.25)
         self.assertEqual([round(s["start_s"], 2) for s in shots], [0.0, 1.0, 3.0])
 
+    def test_a_cut_with_the_same_picture_on_both_sides_is_dropped(self):
+        # an outside re-grade (25.10), checked by eye on a Prelinger film: haze and a plane turning inside one shot
+        # were reported as cuts; the frames 4 apart across them differ by 5-14, real cuts here by 29 and more
+        a, b = bytes([40] * 100), bytes([200] * 100)
+        frames = [a] * 20 + [b] * 20
+        same = [a] * 40
+        self.assertEqual(cut_sheet.confirm_cuts([20 / 25], frames, 25), [0.8])
+        self.assertEqual(cut_sheet.confirm_cuts([20 / 25], same, 25), [])
+        near = [bytes([40 + i // 8] * 100) for i in range(40)]           # a slow drift: about 1 grey level apart
+        self.assertEqual(cut_sheet.confirm_cuts([20 / 25], near, 25), [])
+
+    def test_overlapping_transitions_are_merged(self):
+        self.assertEqual(cut_sheet.merge_spans([(10, 20), (18, 30), (40, 50)]), [(10, 30), (40, 50)])
+        self.assertEqual(cut_sheet.merge_spans([(40, 50), (10, 20)]), [(10, 20), (40, 50)])
+
     def test_stats(self):
         st = cut_sheet.stats(cut_sheet.build_shots([2.0, 3.0], duration=6.0, fps=30), duration=6.0)
         self.assertEqual(st["shots"], 3)
@@ -205,6 +220,8 @@ class Gradual(unittest.TestCase):
                             "-o", out], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("gradual", r.stderr)
+        # and in the summary line on stdout, for whoever pipes stdout or ignores stderr (an outside re-grade, 25.10)
+        self.assertIn("gradual transition(s) not counted", r.stdout.splitlines()[0])
 
 
 if __name__ == "__main__":

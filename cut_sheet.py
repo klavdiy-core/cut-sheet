@@ -14,7 +14,7 @@ import statistics
 import subprocess
 import sys
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 PTS = re.compile(r"Parsed_showinfo.*?\bpts_time:\s*([0-9.]+)")
 
 
@@ -137,7 +137,35 @@ def _blend(a, b, m):
     return alpha, res
 
 
-def detect_transitions(path, fps, lag_s=0.4, min_change=12.0, linear_max=0.3, plateau=1.5):
+def confirm_cuts(cuts, frames, fps, gap=4, min_across=20.0):
+    """Keep a cut only if the picture really differs across it: the frames `gap` before and after it (64x36 grey)
+    differ by at least min_across grey levels on average. Haze clearing or a plane turning inside one shot can trip the
+    detector, but the same picture sits on both sides. Calibrated by eye (25.10) on a Prelinger film and the fixtures:
+    such false cuts measured 5-14, real cuts 29 and more, including two cuts between shots of the same grey street."""
+    if not frames:
+        return list(cuts)
+    n, px = len(frames), len(frames[0])
+    kept = []
+    for c in cuts:
+        i = round(c * fps)
+        a, b = frames[max(0, i - gap)], frames[min(n - 1, i + gap - 1)]
+        if sum(abs(x - y) for x, y in zip(a, b)) / px >= min_across:
+            kept.append(c)
+    return kept
+
+
+def merge_spans(spans):
+    """Overlapping or touching spans become one (two detections of the same transition)."""
+    out = []
+    for s, e in sorted(spans):
+        if out and s <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], e))
+        else:
+            out.append((s, e))
+    return out
+
+
+def detect_transitions(path, fps, lag_s=0.4, min_change=12.0, linear_max=0.3, plateau=1.5, frames=None):
     """Dissolves and fades: the picture blends from one shot into another.
     For a centre frame m with a = m-lag and b = m+lag:
     - the change |a-b| is large;
@@ -147,7 +175,7 @@ def detect_transitions(path, fps, lag_s=0.4, min_change=12.0, linear_max=0.3, pl
     - the picture before the span differs from the one after it (a glow that fades back is not a transition).
     Returns [{start_s, end_s}] (the span is the centres widened by the lag). Checked by eye on 7 real clips: 8 of
     9 found spans are real dissolves or fades, no visible one missed (see README)."""
-    f = _gray_frames(path)
+    f = frames if frames is not None else _gray_frames(path)
     n, lag = len(f), max(3, round(fps * lag_s))
     if n < 6 * lag + 1:
         return []
@@ -181,7 +209,7 @@ def detect_transitions(path, fps, lag_s=0.4, min_change=12.0, linear_max=0.3, pl
         cur.append(i)
     if cur:
         runs.append(cur)
-    spans = [(max(0, r[0] - lag), min(n - 1, r[-1] + lag)) for r in runs if len(r) >= 3]   # widened by the lag
+    spans = merge_spans([(max(0, r[0] - lag), min(n - 1, r[-1] + lag)) for r in runs if len(r) >= 3])   # widened
     # a transition leads to another picture; a glow or flash that fades back to the same shot does not
     return [{"start_s": round(s / fps, 3), "end_s": round(e / fps, 3)} for s, e in spans
             if diff(f[max(0, s - lag)], f[min(n - 1, e + lag)]) >= min_change]
@@ -237,8 +265,11 @@ def analyse(path, fps=30, threshold=None, min_shot=0.2, gradual=False):
     """threshold=None: the adaptive detector; a number: a plain ffmpeg scene threshold.
     gradual=True: a dissolve or fade also ends a shot (at its middle); otherwise it is only listed."""
     info = probe(path)
+    src_fps = info["fps"] or fps
+    frames = _gray_frames(path)
     cuts = detect_cuts_adaptive(path) if threshold is None else detect_cuts(path, threshold)
-    transitions = detect_transitions(path, info["fps"] or fps)
+    cuts = confirm_cuts(cuts, frames, src_fps)
+    transitions = detect_transitions(path, src_fps, frames=frames)
     if gradual:
         cuts = list(cuts) + [round((t["start_s"] + t["end_s"]) / 2, 3) for t in transitions]
     shots = build_shots(cuts, info["duration"], fps, min_shot)
@@ -343,7 +374,10 @@ def main(argv=None):
         print(f"cut-sheet: {e}", file=sys.stderr)
         return 2
     st = sheet["stats"]
-    print(f"{sheet['source']}: {sheet['duration_s']} s, {st['shots']} shots, mean {st['mean_shot_s']} s "
+    tr = sheet["transitions"]
+    # in the summary itself, not only on stderr: "1 shots" for a film edited with dissolves read as the whole answer
+    gradual_note = f" + {len(tr)} gradual transition(s) not counted (--gradual)" if tr and not a.gradual else ""
+    print(f"{sheet['source']}: {sheet['duration_s']} s, {st['shots']} shots{gradual_note}, mean {st['mean_shot_s']} s "
           f"(median {st['median_shot_s']}, {st['shortest_s']}..{st['longest_s']}), {st['cuts_per_min']} cuts/min")
     for s in sheet["shots"][:40]:
         print(f"  {s['index']:>3}  {s['start_s']:8.3f} -> {s['end_s']:8.3f}  {s['duration_s']:6.3f} s  "
